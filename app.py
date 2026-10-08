@@ -1,0 +1,122 @@
+import sys
+
+# Ensure UTF-8 output and immediate line buffering on Windows consoles
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', line_buffering=True)
+
+import discord
+from discord.ext import commands, tasks
+import os
+import traceback
+from flask import Flask
+import aiohttp
+import asyncio
+from dotenv import load_dotenv
+
+# Initialize environment variables
+load_dotenv()
+
+# Flask Setup
+app = Flask(__name__)
+bot_name = "Loading..."
+
+@app.route('/')
+def home():
+    """Health check endpoint for Render"""
+    return f"Bot {bot_name} is operational"
+
+def run_flask():
+    """Run Flask with Render-compatible settings"""
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# Discord Bot Setup
+TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise ValueError("Missing TOKEN in environment")
+
+class Bot(commands.Bot):
+    def __init__(self):
+        # Configure minimal required intents
+        intents = discord.Intents.default()
+        intents.message_content = True
+        
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+            help_command=None
+        )
+        self.session = None
+
+    async def setup_hook(self):
+        """Initialize bot components"""
+        self.session = aiohttp.ClientSession()
+        
+        # Load cogs
+        try:
+            await self.load_extension("cogs.infoCommands")
+            print("Successfully loaded InfoCommands cog")
+        except Exception as e:
+            print(f"Failed to load cog: {e}")
+        print("Syncing slash commands...")
+        await self.tree.sync()
+        print("Slash commands synced successfully")
+        self.update_status.start()
+
+    async def on_ready(self):
+        """When bot connects to Discord"""
+        global bot_name
+        bot_name = str(self.user)
+        
+        print(f"\nConnected as {bot_name}")
+        print(f"Serving {len(self.guilds)} servers")
+        
+        # Start Flask if running on Render
+        if os.environ.get('RENDER'):
+            import threading
+            flask_thread = threading.Thread(target=run_flask, daemon=True)
+            flask_thread.start()
+            print("Flask server started in background")
+
+    @tasks.loop(minutes=5)
+    async def update_status(self):
+        """Update bot presence periodically"""
+        try:
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f"{len(self.guilds)} servers"
+            )
+            await self.change_presence(activity=activity)
+        except Exception as e:
+            print(f"Status update failed: {e}")
+
+    @update_status.before_loop
+    async def before_status_update(self):
+        await self.wait_until_ready()
+
+    async def close(self):
+        """Cleanup on shutdown"""
+        if self.session:
+            await self.session.close()
+        await super().close()
+
+async def main():
+    bot = Bot()
+    try:
+        await bot.start(TOKEN)
+    except KeyboardInterrupt:
+        await bot.close()
+    except Exception as e:
+        print(f"⚠️ Critical error: {e}")
+        traceback.print_exc()
+        await bot.close()
+
+if __name__ == "__main__":
+    # Special handling for Render's environment
+    if os.environ.get('RENDER'):
+        asyncio.run(main())
+    else:
+        bot = Bot()
+        bot.run(TOKEN)
